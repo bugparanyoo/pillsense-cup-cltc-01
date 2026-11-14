@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pillsense Cup - Dashboard</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; display: flex; justify-content: center; }
+        .container { background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
+        h2 { color: #2c3e50; margin-bottom: 5px; }
+        .status { font-size: 14px; margin-bottom: 20px; padding: 6px; border-radius: 6px; display: inline-block; font-weight: bold; }
+        .disconnected { background: #ffebee; color: #c62828; }
+        .connected { background: #e8f5e9; color: #2e7d32; }
+        .card { background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; margin-bottom: 15px; text-align: left; }
+        .card h3 { margin-top: 0; font-size: 16px; color: #34495e; }
+        .value { font-size: 22px; font-weight: bold; color: #2980b9; }
+        button { background-color: #3498db; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 6px; cursor: pointer; width: 100%; margin-top: 10px; transition: background 0.3s; }
+        button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #bdc3c7; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Pillsense Cup</h2>
+    <p>Smart Thermos & Pill Reminder</p>
+    
+    <div id="connectionStatus" class="status disconnected">สถานะ: ยังไม่ได้เชื่อมต่อ</div>
+
+    <button id="connectBtn" onclick="connectBLE()">เชื่อมต่ออุปกรณ์ (Connect BLE)</button>
+
+    <div class="card" style="margin-top: 20px;">
+        <h3>📊 ข้อมูลระดับน้ำ (Telemetry)</h3>
+        <p>ระดับน้ำ: <span id="waterLevel" class="value">-- %</span></p>
+        <p style="font-size: 13px; color: #7f8c8d;" id="lastUpdate">อัปเดตล่าสุด: --</p>
+    </div>
+
+    <div class="card">
+        <h3>⏰ ตั้งค่าเวลาอุปกรณ์</h3>
+        <p style="font-size: 13px; color: #7f8c8d;">ซิงค์เวลานาฬิกาจากมือถือ/เบราว์เซอร์เข้าสู่แก้ว</p>
+        <button id="syncTimeBtn" onclick="syncTime()" disabled>ซิงค์เวลาปัจจุบัน</button>
+    </div>
+</div>
+
+<script>
+    // UUIDs ที่ตรงกับโค้ดใน ESP32-C3
+    const SERVICE_UUID = "42a70001-e29f-412f-a2e6-7b5c87c0e001";
+    const TIME_SYNC_UUID = "42a70002-e29f-412f-a2e6-7b5c87c0e001";
+    const TELEMETRY_UUID = "42a70003-e29f-412f-a2e6-7b5c87c0e001";
+
+    let bluetoothDevice;
+    let telemetryCharacteristic;
+    let timeCharacteristic;
+
+    async function connectBLE() {
+        try {
+            document.getElementById('connectionStatus').innerText = "กำลังค้นหาอุปกรณ์...";
+            
+            // ค้นหาอุปกรณ์ชื่อ Pillsense-Cup หรือ Service UUID
+            bluetoothDevice = await navigator.bluetooth.requestDevice({
+                filters: [{ name: 'Pillsense-Cup' }],
+                optionalServices: [SERVICE_UUID]
+            });
+
+            bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+            document.getElementById('connectionStatus').innerText = "กำลังเชื่อมต่อ GATT...";
+            const server = await bluetoothDevice.gatt.connect();
+
+            document.getElementById('connectionStatus').innerText = "กำลังโหลด Service...";
+            const service = await server.getPrimaryService(SERVICE_UUID);
+
+            // ดึง Characteristic สำหรับรับส่งข้อมูล
+            telemetryCharacteristic = await service.getCharacteristic(TELEMETRY_UUID);
+            timeCharacteristic = await service.getCharacteristic(TIME_SYNC_UUID);
+
+            // เปิดใช้งานการแจ้งเตือนข้อมูล (Notify) จาก ESP32
+            await telemetryCharacteristic.startNotifications();
+            telemetryCharacteristic.addEventListener('characteristicvaluechanged', handleTelemetryData);
+
+            // เปลี่ยนสถานะหน้าจอ
+            document.getElementById('connectionStatus').innerText = "สถานะ: เชื่อมต่อสำเร็จ ✅";
+            document.getElementById('connectionStatus').className = "status connected";
+            document.getElementById('connectBtn').innerText = "ตัดการเชื่อมต่อ";
+            document.getElementById('connectBtn').onclick = disconnectBLE;
+            document.getElementById('syncTimeBtn').disabled = false;
+
+            // ซิงค์เวลาอัตโนมัติทันทีที่เชื่อมต่อสำเร็จ
+            syncTime();
+
+        } catch (error) {
+            console.error("Connection failed:", error);
+            alert("การเชื่อมต่อล้มเหลว: " + error);
+            document.getElementById('connectionStatus').innerText = "สถานะ: ยังไม่ได้เชื่อมต่อ";
+        }
+    }
+
+    function handleTelemetryData(event) {
+        const value = new TextDecoder().decode(event.target.value);
+        // รูปแบบข้อมูลที่ส่งมาจาก ESP32 เช่น "H2O:75%,Time:08:30"
+        document.getElementById('waterLevel').innerText = value;
+        
+        const now = new Date();
+        document.getElementById('lastUpdate').innerText = "อัปเดตล่าสุด: " + now.toLocaleTimeString();
+    }
+
+    async function syncTime() {
+        if (!timeCharacteristic) return;
+        try {
+            // ดึงค่า Unix Timestamp ปัจจุบัน (หน่วยวินาที)
+            const unixTime = Math.floor(Date.now() / 1000);
+            const buffer = new ArrayBuffer(4);
+            const view = new DataView(buffer);
+            view.setUint32(0, unixTime, true); // Little-endian
+
+            await timeCharacteristic.writeValue(buffer);
+            alert("ซิงค์เวลาสำเร็จเรียบร้อย!");
+        } catch (error) {
+            console.error("Sync time failed:", error);
+            alert("ซิงค์เวลาไม่สำเร็จ: " + error);
+        }
+    }
+
+    function disconnectBLE() {
+        if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+            bluetoothDevice.gatt.disconnect();
+        }
+    }
+
+    function onDisconnected() {
+        document.getElementById('connectionStatus').innerText = "สถานะ: ตัดการเชื่อมต่อแล้ว ❌";
+        document.getElementById('connectionStatus').className = "status disconnected";
+        document.getElementById('connectBtn').innerText = "เชื่อมต่ออุปกรณ์ (Connect BLE)";
+        document.getElementById('connectBtn').onclick = connectBLE;
+        document.getElementById('syncTimeBtn').disabled = true;
+        document.getElementById('waterLevel').innerText = "-- %";
+    }
+</script>
+
+</body>
+</html>
